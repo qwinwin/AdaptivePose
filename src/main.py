@@ -16,95 +16,121 @@ from datasets.dataset_factory import get_dataset
 from trains.train_factory import train_factory
 from flops_counter import get_model_complexity_info
 
+
 def main(opt):
-  #import pudb;pudb.set_trace()
-  torch.manual_seed(opt.seed)
-  torch.backends.cudnn.benchmark = not opt.not_cuda_benchmark and not opt.test
-  Dataset = get_dataset(opt.dataset, opt.task)
-  opt = opts().update_dataset_info_and_set_heads(opt, Dataset)
-  print(opt)
+    # import pudb;pudb.set_trace()
+    torch.manual_seed(opt.seed)
+    torch.backends.cudnn.benchmark = not opt.not_cuda_benchmark and not opt.test
+    Dataset = get_dataset(opt.dataset, opt.task)
+    opt = opts().update_dataset_info_and_set_heads(opt, Dataset)
+    print(opt)
 
-  logger = Logger(opt)
+    logger = Logger(opt)
 
-  os.environ['CUDA_VISIBLE_DEVICES'] = opt.gpus_str
-  opt.device = torch.device('cuda' if opt.gpus[0] >= 0 else 'cpu')
-  #torch.cuda.set_device([2,3])
-  print('Creating model...')
-  model = create_model(opt.arch, opt.heads, opt.head_conv)
+    os.environ['CUDA_VISIBLE_DEVICES'] = opt.gpus_str
+    opt.device = torch.device('cuda' if opt.gpus[0] >= 0 else 'cpu')
+    # torch.cuda.set_device([2,3])
+    print('Creating model...')
+    model = create_model(opt.arch, opt.heads, opt.head_conv)
 
-  optimizer = torch.optim.Adam(model.parameters(), opt.lr)
-  start_epoch = 0
-  if opt.load_model != '':
-    model, optimizer, start_epoch = load_model(
-      model, opt.load_model, optimizer, opt.resume, opt.lr, opt.lr_step)
+    optimizer = torch.optim.Adam(model.parameters(), opt.lr)
+    start_epoch = 0
+    if opt.load_model != '':
+        model, optimizer, start_epoch = load_model(
+            model, opt.load_model, optimizer, opt.resume, opt.lr, opt.lr_step)
 
-  Trainer = train_factory[opt.task]
-  trainer = Trainer(opt, model, optimizer)
-  trainer.set_device(opt.gpus, opt.chunk_sizes, opt.device)
+    Trainer = train_factory[opt.task]
+    trainer = Trainer(opt, model, optimizer)
+    trainer.set_device(opt.gpus, opt.chunk_sizes, opt.device)
 
-  print('Setting up data...')
-  val_loader = torch.utils.data.DataLoader(
-      Dataset(opt, 'val'), 
-      batch_size=1, 
-      shuffle=False,
-      num_workers=1,
-      pin_memory=True
-  )
+    print('Setting up data...')
+    val_loader = torch.utils.data.DataLoader(
+        Dataset(opt, 'val'),
+        batch_size=1,
+        shuffle=False,
+        num_workers=1,
+        pin_memory=True
+    )
 
-  if opt.test:
-    _, preds = trainer.val(0, val_loader)
-    val_loader.dataset.run_eval(preds, opt.save_dir)
-    return
+    if opt.test:
+        _, preds = trainer.val(0, val_loader)
+        val_loader.dataset.run_eval(preds, opt.save_dir)
+        return
 
-  train_loader = torch.utils.data.DataLoader(
-      Dataset(opt, 'train'), 
-      batch_size=opt.batch_size, 
-      shuffle=True,
-      num_workers=opt.num_workers,
-      pin_memory=True,
-      drop_last=True
-  )
+    train_loader = torch.utils.data.DataLoader(
+        Dataset(opt, 'train'),
+        batch_size=opt.batch_size,
+        shuffle=True,
+        num_workers=opt.num_workers,
+        pin_memory=True,
+        drop_last=True
+    )
 
-  print('Starting training...')
-  best = 1e10
-  for epoch in range(start_epoch + 1, opt.num_epochs + 1):
-    print('epoch:',epoch)
-    mark = epoch if opt.save_all else 'last'
-    log_dict_train, _ = trainer.train(epoch, train_loader)
-    logger.write('epoch: {} |'.format(epoch))
-    for k, v in log_dict_train.items():
-      logger.scalar_summary('train_{}'.format(k), v, epoch)
-      logger.write('{} {:8f} | '.format(k, v))
-    if opt.val_intervals > 0 and epoch % opt.val_intervals == 0:
-      save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(mark)), 
-                 epoch, model, optimizer)
-      with torch.no_grad():
-        log_dict_val, preds = trainer.val(epoch, val_loader)
-      #import pudb;pudb.set_trace()
-      info_eval = val_loader.dataset.run_eval(preds, opt.save_dir)
+    print('Starting training...')
+    bestval_path = f"{opt.save_dir}/bestval"
+    try:
+        best = 0
+        with open(bestval_path, 'r') as file:
+            for item in eval(file.read()):
+                if item[0] == 'AP':
+                    best = best + item[1]
+                elif item[0] in ('Ap .5', 'AP .75'):
+                    best = best + 0.5 * item[1]
+    # except FileNotFoundError:
+    except Exception:
+        print("open bestval failed")
 
+    # best = 1e10
+    for epoch in range(start_epoch + 1, opt.num_epochs + 1):
+        print('epoch:', epoch)
+        mark = epoch if opt.save_all else 'last'
+        log_dict_train, _ = trainer.train(epoch, train_loader)
+        logger.write('epoch: {} |'.format(epoch))
+        for k, v in log_dict_train.items():
+            logger.scalar_summary('train_{}'.format(k), v, epoch)
+            logger.write('{} {:8f} | '.format(k, v))
+        if opt.val_intervals > 0 and epoch % opt.val_intervals == 0:
+            save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(mark)),
+                       epoch, model, optimizer)
+            with torch.no_grad():
+                log_dict_val, preds = trainer.val(epoch, val_loader)
+            # import pudb;pudb.set_trace()
+            info_eval = val_loader.dataset.run_eval(preds, opt.save_dir)
+            result = 0
+            for item in info_eval:
+                if item[0] == 'AP':
+                    result = result + item[1]
+                elif item[0] in ('Ap .5', 'AP .75'):
+                    result = result + 0.5 * item[1]
+            if best is None or best < result:
+                best = result
+                with open(f'{opt.save_dir}/bestval', 'w') as f:
+                    f.write(str(info_eval))
+                save_model(os.path.join(opt.save_dir, 'model_best.pth'),
+                           epoch, model, optimizer)
 
-      for k, v in log_dict_val.items():
-        logger.scalar_summary('val_{}'.format(k), v, epoch)
-        logger.write('{} {:8f} | '.format(k, v))
-      # if log_dict_val[opt.metric] < best:
-      #   best = log_dict_val[opt.metric]
-      save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(epoch)), 
-                   epoch, model)
-    else:
-      save_model(os.path.join(opt.save_dir, 'model_last.pth'), 
-                 epoch, model, optimizer)
-    logger.write('\n')
-    if epoch in opt.lr_step:
-      save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(epoch)), 
-                 epoch, model, optimizer)
-      lr = opt.lr * (0.1 ** (opt.lr_step.index(epoch) + 1))
-      print('Drop LR to', lr)
-      for param_group in optimizer.param_groups:
-          param_group['lr'] = lr
-  logger.close()
+            for k, v in log_dict_val.items():
+                logger.scalar_summary('val_{}'.format(k), v, epoch)
+                logger.write('{} {:8f} | '.format(k, v))
+            # if log_dict_val[opt.metric] < best:
+            #   best = log_dict_val[opt.metric]
+            save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(epoch)),
+                       epoch, model)
+        else:
+            save_model(os.path.join(opt.save_dir, 'model_last.pth'),
+                       epoch, model, optimizer)
+        logger.write('\n')
+        if epoch in opt.lr_step:
+            save_model(os.path.join(opt.save_dir, 'model_{}.pth'.format(epoch)),
+                       epoch, model, optimizer)
+            lr = opt.lr * (0.1 ** (opt.lr_step.index(epoch) + 1))
+            print('Drop LR to', lr)
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+    logger.close()
+
 
 if __name__ == '__main__':
-  #import pudb;pudb.set_trace()
-  opt = opts().parse()
-  main(opt)
+    # import pudb;pudb.set_trace()
+    opt = opts().parse()
+    main(opt)
