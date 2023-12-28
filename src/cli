@@ -1,0 +1,4 @@
+python main.py multi_pose_crowdpose --exp_id crowdpose512 --dataset crowdpose --batch_size 4 --lr 2.5e-4 --gpus 0 \
+--num_epochs 280 --lr_step 230,260 --num_workers 16  --K 20 --arch hrnet_32 \
+--val_intervals 5 --input_res 512 --not_reg_hp_offset --not_reg_offset \
+--aug_rot 0.5 --rotate 15 --hide_data_time
